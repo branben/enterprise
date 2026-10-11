@@ -2,6 +2,7 @@ import asyncio
 from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 
+import httpx
 from jinja2 import Environment
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
@@ -11,6 +12,7 @@ from integrations.resolver_context import ResolverUserContext
 from integrations.resolver_org_router import resolve_org_for_repo
 from integrations.slack.slack_attachments import collect_message_attachment_content
 from integrations.slack.slack_errors import SlackError, SlackErrorCode
+from integrations.exceptions import APIConversationError
 from integrations.slack.slack_types import (
     SlackMessageView,
     SlackViewInterface,
@@ -419,14 +421,20 @@ class SlackUpdateExistingConversationView(SlackNewConversationView):
                 )
                 response.raise_for_status()
 
-            except Exception as e:
-                logger.exception(
-                    '[Slack V1] Failed to send message to conversation %s: %s',
-                    self.conversation_id,
-                    str(e),
-                    stack_info=True,
-                )
-                raise Exception('Failed to send message to v1 conversation') from e
+            except httpx.HTTPStatusError as e:
+                error_detail = str(e)
+                error_id = None
+                try:
+                    body = e.response.json()
+                    error_detail = body.get('detail', str(e))
+                    error_id = body.get('error_id')
+                except Exception:
+                    pass
+                raise APIConversationError(
+                    status_code=e.response.status_code,
+                    error_detail=error_detail,
+                    error_id=error_id,
+                ) from e
 
     async def create_or_update_conversation(self, jinja: Environment) -> str:
         """Send new user message to conversation."""

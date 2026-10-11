@@ -293,3 +293,99 @@ class TestPausedSandboxResumption:
         mock_sandbox_service.resume_sandbox.assert_called_once_with('sandbox-123')
         mock_httpx_client.post.assert_called_once()
         mock_response.raise_for_status.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Test: APIConversationError on HTTP errors
+# ---------------------------------------------------------------------------
+
+
+class TestAPIConversationError:
+    """Test that API errors are raised as APIConversationError with full context."""
+
+    @patch('openhands.app_server.config.get_sandbox_service')
+    @patch('openhands.app_server.config.get_app_conversation_info_service')
+    @patch('openhands.app_server.config.get_httpx_client')
+    @patch('openhands.app_server.event_callback.util.ensure_running_sandbox')
+    @patch('openhands.app_server.event_callback.util.get_agent_server_url_from_sandbox')
+    @patch.object(
+        SlackUpdateExistingConversationView, '_get_instructions', new_callable=AsyncMock
+    )
+    async def test_http_error_raises_api_conversation_error(
+        self,
+        mock_get_instructions,
+        mock_get_agent_server_url,
+        mock_ensure_running_sandbox,
+        mock_get_httpx_client,
+        mock_get_app_info_service,
+        mock_get_sandbox_service,
+        slack_update_conversation_view_v1,
+        mock_jinja_env,
+    ):
+        """Test that HTTP errors are raised as APIConversationError."""
+        import httpx
+
+        from integrations.exceptions import APIConversationError
+
+        mock_get_instructions.return_value = ('User message', '')
+        mock_app_info_service = AsyncMock()
+        mock_app_info = MagicMock()
+        mock_app_info.sandbox_id = 'sandbox-123'
+        mock_app_info_service.get_app_conversation_info.return_value = mock_app_info
+        mock_get_app_info_service.return_value.__aenter__.return_value = (
+            mock_app_info_service
+        )
+
+        mock_sandbox_service = AsyncMock()
+        mock_running_sandbox = MagicMock()
+        mock_running_sandbox.status = SandboxStatus.RUNNING
+        mock_running_sandbox.session_api_key = 'test-api-key'
+        mock_running_sandbox.exposed_urls = [
+            MagicMock(name='AGENT_SERVER', url='http://localhost:8000')
+        ]
+        mock_sandbox_service.get_sandbox.return_value = mock_running_sandbox
+        mock_get_sandbox_service.return_value.__aenter__.return_value = (
+            mock_sandbox_service
+        )
+        mock_ensure_running_sandbox.return_value = mock_running_sandbox
+        mock_get_agent_server_url.return_value = 'http://localhost:8000'
+
+        mock_httpx_client = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+        mock_response.json.return_value = {
+            'detail': 'Unsupported or missing $schema in plugin.json',
+            'error_id': 'abc123',
+        }
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            'Server Error', request=MagicMock(), response=mock_response
+        )
+        mock_httpx_client.post.return_value = mock_response
+        mock_get_httpx_client.return_value.__aenter__.return_value = mock_httpx_client
+
+        with pytest.raises(APIConversationError) as exc_info:
+            await slack_update_conversation_view_v1.send_message_to_v1_conversation(
+                mock_jinja_env
+            )
+
+        assert exc_info.value.status_code == 500
+        assert 'Unsupported or missing $schema' in exc_info.value.error_detail
+        assert exc_info.value.error_id == 'abc123'
+
+    def test_to_slack_message_format(self):
+        """Test that to_slack_message produces front matter + detail."""
+        from integrations.exceptions import APIConversationError
+
+        err = APIConversationError(
+            status_code=500,
+            error_detail='Unsupported or missing $schema in plugin.json',
+            error_id='abc123',
+        )
+        msg = err.to_slack_message()
+
+        assert 'error_type: api_error' in msg
+        assert 'http_status: 500' in msg
+        assert 'error_id: abc123' in msg
+        assert 'Unsupported or missing $schema' in msg
+        assert msg.startswith('---')
+        assert 'Error ID: `abc123`' in msg

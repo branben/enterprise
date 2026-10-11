@@ -9,6 +9,7 @@ from sqlalchemy import select
 from integrations.manager import Manager
 from integrations.models import Message, SourceType
 from integrations.slack.slack_errors import SlackError, SlackErrorCode
+from integrations.exceptions import APIConversationError
 from integrations.slack.slack_types import (
     SlackMessageView,
     SlackViewInterface,
@@ -843,6 +844,9 @@ class SlackManager(Manager[SlackViewInterface]):
 
             except StartingConvoException as e:
                 msg_info = str(e)
+
+            except APIConversationError as e:
+                msg_info = e.to_slack_message()
 
             await self.send_message(msg_info, slack_view)
 
